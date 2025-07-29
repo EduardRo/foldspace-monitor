@@ -1,48 +1,85 @@
 import { ref, onMounted, onUnmounted } from 'vue'
 import { useAgentStore } from '../stores/agentStore'
-import { io } from 'socket.io-client'
 
-const socket = io('http://localhost:3001')
+let ws = null
+const connected = ref(false)
 
 export function useWebSocket() {
   const agentStore = useAgentStore()
-  const connected = ref(false)
 
   onMounted(() => {
-    socket.on('connect', () => {
-      console.log('Connected to WebSocket server')
+    // Connect to raw WebSocket
+    ws = new WebSocket('ws://localhost:3001')
+
+    ws.onopen = () => {
+      console.log('✅ Connected to WebSocket server')
       connected.value = true
-    })
 
-    socket.on('disconnect', () => {
-      console.log('Disconnected from WebSocket server')
+      // Send initial connection message
+      ws.send(JSON.stringify({
+        type: 'vue_client_connected',
+        timestamp: new Date().toISOString()
+      }))
+    }
+
+    ws.onclose = () => {
+      console.log('❌ Disconnected from WebSocket server')
       connected.value = false
-    })
+    }
 
-    // Handle agent updates
-    socket.on('agent_update', (update) => {
-      console.log('Agent update received:', update)
-      agentStore.updateAgent(update)
+    ws.onerror = (error) => {
+      console.error('❌ WebSocket error:', error)
+      connected.value = false
+    }
 
-      // Update pipeline status if needed
-      if (update.agent_name === 'PipelineController') {
-        agentStore.setPipelineStatus(update.status, update.message.includes('Pipeline') ? update.message.split(' ')[1] : null)
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        console.log('📥 Received:', data)
+
+        // Handle different message types
+        if (data.agent_name) {
+          agentStore.updateAgent(data)
+        }
+
+        if (data.event_type === 'pipeline_start') {
+          agentStore.setPipelineStatus('active')
+        }
+
+        if (data.event_type === 'pipeline_complete') {
+          agentStore.setPipelineStatus('completed')
+        }
+
+        // Handle system events
+        if (data.type === 'system_event') {
+          if (data.event_type === 'pipeline_start') {
+            agentStore.setPipelineStatus('active')
+          } else if (data.event_type === 'pipeline_complete') {
+            agentStore.setPipelineStatus('completed')
+          }
+        }
+
+      } catch (error) {
+        console.error('❌ Invalid JSON received:', event.data, error)
       }
-    })
-
-    // Handle system events
-    socket.on('system_event', (event) => {
-      console.log('System event received:', event)
-      // Handle system-level messages here
-    })
+    }
   })
 
   onUnmounted(() => {
-    socket.disconnect()
+    if (ws) {
+      ws.close()
+    }
   })
 
   const startPipeline = (autoMode) => {
-    socket.emit('start_pipeline', { auto: autoMode })
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        start_pipeline: { auto: autoMode }
+      }))
+      console.log('▶️ Pipeline start command sent')
+    } else {
+      console.error('❌ Cannot start pipeline - WebSocket not connected')
+    }
   }
 
   return {
